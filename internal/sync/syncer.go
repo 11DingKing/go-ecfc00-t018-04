@@ -7,6 +7,7 @@ package sync
 
 import (
 	"context"
+	stdsync "sync"
 	"sync/atomic"
 	"time"
 
@@ -20,9 +21,10 @@ type Syncer struct {
 	store       *store.Store
 	interval    time.Duration
 	online      atomic.Bool
+	runMu       stdsync.Mutex // guards the last-run timestamps below
 	slaLastRun  time.Time
 	syncLastRun time.Time
-	syncedCount int64
+	syncedCount atomic.Int64
 	failedCount atomic.Int64
 	slaFlagged  atomic.Int64
 }
@@ -46,7 +48,7 @@ func (s *Syncer) SetOnline(v bool) { s.online.Store(v) }
 func (s *Syncer) IsOnline() bool { return s.online.Load() }
 
 // SyncedCount returns the total number of records reconciled.
-func (s *Syncer) SyncedCount() int64 { return s.syncedCount }
+func (s *Syncer) SyncedCount() int64 { return s.syncedCount.Load() }
 
 // FailedCount returns the total number of failed sync attempts.
 func (s *Syncer) FailedCount() int64 { return s.failedCount.Load() }
@@ -80,7 +82,9 @@ func (s *Syncer) TickOnce() (slaFlagged, synced, failed int) {
 // monitorSLA flags reported incidents that have exceeded the response SLA.
 func (s *Syncer) monitorSLA() int {
 	n := s.svc.FlagSLABreaches()
+	s.runMu.Lock()
 	s.slaLastRun = s.store.Clock().Now()
+	s.runMu.Unlock()
 	s.slaFlagged.Add(int64(n))
 	return n
 }
@@ -93,7 +97,9 @@ func (s *Syncer) reconcileOffline() (synced, failed int) {
 	if !s.online.Load() {
 		return 0, 0
 	}
+	s.runMu.Lock()
 	s.syncLastRun = s.store.Clock().Now()
+	s.runMu.Unlock()
 	for _, r := range s.store.PendingOffline() {
 		rec, ok := s.store.MarkSyncing(r.LocalID)
 		if !ok {
@@ -107,7 +113,7 @@ func (s *Syncer) reconcileOffline() (synced, failed int) {
 			continue
 		}
 		s.store.MarkSynced(r.LocalID, receipt)
-		s.syncedCount++
+		s.syncedCount.Add(1)
 		synced++
 	}
 	return synced, failed
