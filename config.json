@@ -1,0 +1,9 @@
+{
+  "listen": ":50253",
+  "slaDuration": "30m",
+  "deviationThresholdMeters": 200,
+  "syncInterval": "5s",
+  "gridReuseWindow": "24h",
+  "coreZoneMinAssignees": 2,
+  "equipmentHoldWindow": "2m"
+}
