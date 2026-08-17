@@ -14,15 +14,16 @@ import (
 	"qilian-patrol/internal/store"
 )
 
-// Syncer drives the SLA monitor and offline reconciliation loops.
+// Syncer drives the SLA monitor and offline reconciliation loops. All mutable
+// state is accessed atomically (or guarded by the store's own mutex) so that
+// concurrent TickOnce calls from the background loop and the HTTP handlers, plus
+// concurrent readers of the exposed counters, never race.
 type Syncer struct {
 	svc         *app.Service
 	store       *store.Store
 	interval    time.Duration
 	online      atomic.Bool
-	slaLastRun  time.Time
-	syncLastRun time.Time
-	syncedCount int64
+	syncedCount atomic.Int64
 	failedCount atomic.Int64
 	slaFlagged  atomic.Int64
 }
@@ -46,7 +47,7 @@ func (s *Syncer) SetOnline(v bool) { s.online.Store(v) }
 func (s *Syncer) IsOnline() bool { return s.online.Load() }
 
 // SyncedCount returns the total number of records reconciled.
-func (s *Syncer) SyncedCount() int64 { return s.syncedCount }
+func (s *Syncer) SyncedCount() int64 { return s.syncedCount.Load() }
 
 // FailedCount returns the total number of failed sync attempts.
 func (s *Syncer) FailedCount() int64 { return s.failedCount.Load() }
@@ -80,20 +81,19 @@ func (s *Syncer) TickOnce() (slaFlagged, synced, failed int) {
 // monitorSLA flags reported incidents that have exceeded the response SLA.
 func (s *Syncer) monitorSLA() int {
 	n := s.svc.FlagSLABreaches()
-	s.slaLastRun = s.store.Clock().Now()
 	s.slaFlagged.Add(int64(n))
 	return n
 }
 
 // reconcileOffline replays pending offline records when connectivity is
-// available. Each record is applied exactly once thanks to the idempotency of
-// the underlying operations; a second replay of the same record is a no-op and
-// still produces a receipt.
+// available. MarkSyncing claims a record exclusively: a record that is already
+// syncing or synced is skipped, so concurrent reconcile passes never
+// double-process the same record. Application remains idempotent by IssueID as
+// a defence-in-depth against duplicate enqueues.
 func (s *Syncer) reconcileOffline() (synced, failed int) {
 	if !s.online.Load() {
 		return 0, 0
 	}
-	s.syncLastRun = s.store.Clock().Now()
 	for _, r := range s.store.PendingOffline() {
 		rec, ok := s.store.MarkSyncing(r.LocalID)
 		if !ok {
@@ -107,7 +107,7 @@ func (s *Syncer) reconcileOffline() (synced, failed int) {
 			continue
 		}
 		s.store.MarkSynced(r.LocalID, receipt)
-		s.syncedCount++
+		s.syncedCount.Add(1)
 		synced++
 	}
 	return synced, failed

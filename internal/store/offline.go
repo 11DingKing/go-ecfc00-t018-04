@@ -111,7 +111,9 @@ func (s *Store) OfflineReceipt(receiptID string) (OfflineRecord, bool) {
 }
 
 // MarkSyncing transitions a record to syncing under the write lock and returns
-// a snapshot copy. It returns ok=false if the record was already processed.
+// a snapshot copy. It returns ok=false if the record is already being synced by
+// another worker or has already been synced, which is what keeps concurrent
+// reconcile passes from double-processing (and double-counting) a record.
 func (s *Store) MarkSyncing(localID string) (OfflineRecord, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -119,7 +121,7 @@ func (s *Store) MarkSyncing(localID string) (OfflineRecord, bool) {
 	if !ok {
 		return OfflineRecord{}, false
 	}
-	if r.Status == OfflineSynced {
+	if r.Status == OfflineSyncing || r.Status == OfflineSynced {
 		return r, false
 	}
 	r.Status = OfflineSyncing
